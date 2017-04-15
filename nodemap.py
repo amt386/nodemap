@@ -110,6 +110,7 @@ class AboutWindow(QDialog):
         self.setLayout(grid)
         self.show()
 
+        self.setMinimumSize(320, 0)
         # This window can't be resized.
         self.setFixedSize(self.size())
 
@@ -121,6 +122,8 @@ class NodeWidget(QtWidgets.QWidget):
     (note: overlayed node captions are rendered separately by the parent window)
 
     """
+    SIZE = (32, 32)
+
     color = None
     color_dimmed = None
 
@@ -143,8 +146,8 @@ class NodeWidget(QtWidgets.QWidget):
         self.initUI()
         
     def initUI(self):
-        self.resize(32, 32)
-        self.setMinimumSize(32, 32)
+        self.resize(*self.SIZE)
+        #self.setMinimumSize(32, 32)
         
         data = app.nodes[self.node_id]
         self.move(data['x'], data['y'])
@@ -224,8 +227,11 @@ class NodeWidget(QtWidgets.QWidget):
             if modifiers != QtCore.Qt.ControlModifier:
                 self.parentWidget().clear_selection()
 
-            self.parentWidget().add_to_selection(self.node_id)
-            self.repaint()
+            if self.is_selected():
+                self.parentWidget().remove_from_selection(self.node_id)
+            else:
+                self.parentWidget().add_to_selection(self.node_id)
+            self.update()
         e.accept()
 
     def is_selected(self):
@@ -252,7 +258,7 @@ class NodeWidget(QtWidgets.QWidget):
         )
         if ok:
             app.nodes[self.node_id]['text'] = text
-        self.parentWidget().repaint()
+        self.parentWidget().update()
         
     def delete(self, event):
         node_data = app.nodes[self.node_id]
@@ -271,7 +277,7 @@ class NodeWidget(QtWidgets.QWidget):
             self.close()
             self.destroy()
 
-        self.parentWidget().repaint()
+        self.parentWidget().update()
 
 
 class MainWindow(QMainWindow):
@@ -297,21 +303,42 @@ class MainWindow(QMainWindow):
         self.initUI()
 
     def mousePressEvent(self, e):
+        """
+        Clear node selection when user clicks somewhere in the empty space
+        of the main window.
+
+        """
         super().mousePressEvent(e)
         if e.button() in (Qt.LeftButton, Qt.RightButton):
-            self.clear_selection()
-            self.repaint()
+            # Ignore this event if Ctrl key is pressed (multiple selection).
+            modifiers = app.keyboardModifiers()
+            if modifiers != QtCore.Qt.ControlModifier:
+                self.clear_selection()
+                self.update()
 
-    def clear_selection(self):
-        self.selected_nodes.clear()
-        self.statusBar().showMessage('')
+    def _update_statusbar_on_selection(self):
+        if not self.selected_nodes:
+            msg = ''
+        else:
+            msg = 'Selected nodes ({} total): {}.'.format(
+                len(self.selected_nodes),
+                ', '.join(['#%d' % x for x in self.selected_nodes])
+            )
+        self.statusBar().showMessage(msg)
 
     def add_to_selection(self, node_id):
         self.selected_nodes.add(node_id)
-        self.statusBar().showMessage(
-            'Selected node: #{}.'.format(node_id)
-        )
-        self.repaint()
+        self._update_statusbar_on_selection()
+        self.update()
+
+    def remove_from_selection(self, node_id):
+        self.selected_nodes.discard(node_id)
+        self._update_statusbar_on_selection()
+        self.update()
+    
+    def clear_selection(self):
+        self.selected_nodes.clear()
+        self._update_statusbar_on_selection()
 
     def center(self):
         """ Center window on the screen. """
@@ -438,15 +465,21 @@ class MainWindow(QMainWindow):
             e.ignore()
             return  
 
+        # Actually move the node (place center on the widget under cursor)
+        size = e.source().size()
+        e.source().move(
+            e.pos().x() - size.width() // 2,
+            e.pos().y() - size.height() // 2
+        )
+        e.setDropAction(Qt.MoveAction)
+
+        self.update()
+        
         # Show new coordinates in status bar.
         self.statusBar().showMessage('Moved node {} to ({}, {}).'.format(
             e.source().node_id, e.pos().x(), e.pos().y()
         ))
 
-        # Actually move the node.
-        e.source().move(e.pos())
-        e.setDropAction(Qt.MoveAction)
-        self.repaint()
         e.accept()
 
     def paintEvent(self, event):
@@ -549,14 +582,14 @@ class MainWindow(QMainWindow):
         widget = NodeWidget(self, node_id=node_id, node_data=app.nodes[node_id]) 
         self.nodes[node_id] = widget
 
-        self.repaint()
+        self.update()
 
     def connect_nodes(self):
         """ Connect all selected nodes. """
         for src_id, trg_id in itertools.product(self.selected_nodes, repeat=2):
             if src_id != trg_id:
                 app.edges[src_id].add(trg_id)
-        self.repaint()
+        self.update()
 
     def disconnect_nodes(self):
         """ Disconnect all selected nodes. """
@@ -564,7 +597,7 @@ class MainWindow(QMainWindow):
             if src_id != trg_id:
                 # `discard` ignores non-existing elements (unlike `remove`)
                 app.edges[src_id].discard(trg_id)
-        self.repaint()
+        self.update()
 
 
 if __name__ == '__main__':
