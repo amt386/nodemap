@@ -8,6 +8,8 @@ import random
 import os
 import sys
 
+from collections import defaultdict
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from PyQt5.QtCore import Qt, QCoreApplication, pyqtSignal, QObject, QPoint
@@ -52,12 +54,14 @@ class MainApp(QApplication):
         4: {'x': 400, 'y': 200, 'text': 'Node 4'},
     }
 
-    edges = {
+    # Using `collections.defaultdict` for edges to avoid checks.
+    # Default value will be empty set (no edges for this node).
+    edges = defaultdict(set, {
         1: set([4]),
         2: set([1, 3]),
         3: set([2]),
         4: set([1]),
-    }
+    })
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -550,13 +554,16 @@ class MainWindow(QMainWindow):
     def connect_nodes(self):
         """ Connect all selected nodes. """
         for src_id, trg_id in itertools.product(self.selected_nodes, repeat=2):
-            app.edges[src_id].add(trg_id)
+            if src_id != trg_id:
+                app.edges[src_id].add(trg_id)
         self.repaint()
 
     def disconnect_nodes(self):
         """ Disconnect all selected nodes. """
         for src_id, trg_id in itertools.product(self.selected_nodes, repeat=2):
-            app.edges[src_id].remove(trg_id)
+            if src_id != trg_id:
+                # `discard` ignores non-existing elements (unlike `remove`)
+                app.edges[src_id].discard(trg_id)
         self.repaint()
 
 
