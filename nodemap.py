@@ -5,6 +5,7 @@ NodeMap application.
 """
 import itertools
 import random
+import os
 import sys
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -18,9 +19,19 @@ from PyQt5.QtWidgets import (
     QLineEdit, QTextEdit, QInputDialog
 )
 
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))
+
 APPLICATION_NAME = 'NodeMap'
 VERSION = 'v0.0.0'
 AUTHOR = 'Artem Panov'
+
+def _abs_path(rel_path):
+    """
+    Get full path of a file given relative path to the script's directory
+    (used to load assets such as icons).
+
+    """
+    return os.path.join(BASE_DIR, rel_path)
 
 app = None
 
@@ -50,7 +61,7 @@ class MainApp(QApplication):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.icon_logo = QIcon('pixmaps/icon_32x32.xpm')
+        self.icon_logo = QIcon(_abs_path('pixmaps/icon_32x32.xpm'))
 
 
 class AboutWindow(QDialog):
@@ -76,7 +87,7 @@ class AboutWindow(QDialog):
         row = 1
 
         label = QLabel()    # TODO: self - to use or not to use?
-        label.setPixmap(QPixmap('pixmaps/icon_32x32.xpm'))
+        label.setPixmap(QPixmap(_abs_path('pixmaps/icon_32x32.xpm')))
 
         grid.addWidget(label, row, 0)
         grid.addWidget(QLabel('<b>%s</b>' % APPLICATION_NAME), row, 1)
