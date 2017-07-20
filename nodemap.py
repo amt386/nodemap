@@ -4,6 +4,7 @@ NodeMap application.
 
 """
 import argparse
+import functools
 import itertools
 import json
 import random
@@ -20,7 +21,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QDesktopWidget, QMainWindow, QAction, qApp,
     QDialog, QToolTip, QPushButton, QMessageBox, QLabel,
     QHBoxLayout, QVBoxLayout, QGridLayout,
-    QLineEdit, QTextEdit, QInputDialog, QFileDialog
+    QLineEdit, QTextEdit, QInputDialog, QFileDialog, QColorDialog
  
 )
 
@@ -51,6 +52,18 @@ class MainApp(QApplication):
     # Document file extension.
     FILENAME_EXT = 'json'
 
+    # Standard color choices for nodes
+    STD_COLORS = (
+        ('White', (255, 255, 255)),
+        ('Gray', (127, 127, 127)),
+        ('Red', (255, 0, 0)),
+        ('Green', (0, 255, 0)),
+        ('Blue', (0, 0, 255)),
+        ('Yellow (R+G)', (255, 255, 0)),
+        ('Magenta (R+B)', (255, 0, 255)),
+        ('Cyan (G+B)', (0, 255, 255)),
+    )
+
     # Maps node IDs to node data dictionary.
     nodes = {}
 
@@ -61,6 +74,13 @@ class MainApp(QApplication):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.icon_logo = QIcon(_abs_path('pixmaps/icon_32x32.xpm'))
+
+    @functools.lru_cache(maxsize=256)
+    def get_rgb_icon(self, size, rgb):
+        """ Generate QIcon object filled with specified color. """
+        pixmap = QPixmap(size[0], size[1]);
+        pixmap.fill(QColor(*rgb));
+        return QIcon(pixmap);
 
 
 class AboutWindow(QDialog):
@@ -124,22 +144,19 @@ class NodeWidget(QtWidgets.QWidget):
 
     node_id = None
 
-    # Generate color choices: primary (RGB), secondary (CMY) and white.
-    RGB_COLORS = tuple(filter(any, itertools.product((0, 255), repeat=3)))
-
     def __init__(self, *args, **kwargs):      
         self.node_id = kwargs.pop('node_id')
         node_data = kwargs.pop('node_data')
         super().__init__(*args, **kwargs)
-
-        # Choose random color for drawing the node
-        rgb = random.choice(self.RGB_COLORS)
-        self.color = QColor(*rgb)
-        # Dimmed color is used to mark selected nodes.
-        self.color_dimmed = QColor(*[x // 2 for x in rgb])
         
+        self.set_node_color(QColor(*node_data['color']))
         self.initUI()
-        
+
+    def set_node_color(self, color):
+        self.color = color
+        # Dimmed color is used to mark selected nodes.
+        self.color_dimmed = QColor(*[x // 2 for x in color.getRgb()[0:3]])
+
     def initUI(self):
         self.resize(*self.SIZE)
         #self.setMinimumSize(32, 32)
@@ -250,11 +267,25 @@ class NodeWidget(QtWidgets.QWidget):
         menu = QtWidgets.QMenu()
         action_rename = menu.addAction('Rename...')
         action_rename.triggered.connect(self.rename)
+
+        submenu = QtWidgets.QMenu(menu)
+        submenu.setTitle('Change color')
+        for color_name, rgb in app.STD_COLORS:
+            submenu_action = submenu.addAction(color_name)
+            submenu_action.triggered.connect(
+                functools.partial(self.change_color, QColor(*rgb))
+            )
+            submenu_action.setIcon(app.get_rgb_icon((32, 32), rgb))
+        submenu.addSeparator()
+        submenu_action = submenu.addAction('Custom...')
+        submenu_action.triggered.connect(self.change_color)
+        menu.addMenu(submenu)
+
         action_delete = menu.addAction('Delete')
         action_delete.triggered.connect(self.delete)
         menu.exec_(self.mapToGlobal(point))
 
-    def rename(self, event):
+    def rename(self):
         node_data = app.nodes[self.node_id]
         text, ok = QInputDialog.getText(
             self, 'Rename',
@@ -265,8 +296,30 @@ class NodeWidget(QtWidgets.QWidget):
             app.nodes[self.node_id]['text'] = text
         self.parentWidget().mark_as_unsaved()
         self.parentWidget().update()
+    
+    def change_color(self, color=None):
+        node_data = app.nodes[self.node_id]
+
+        if color is None:
+            color = QColorDialog.getColor(self.color, self, "Choose color")
+            if not color.isValid():     # if the user cancels the dialog
+                return
         
-    def delete(self, event):
+        if color == self.color:
+            return
+
+        app.nodes[self.node_id]['color'] = [
+            color.red(), color.green(), color.blue()
+        ]
+        self.set_node_color(color)
+
+        # This color will be used when creating the next node.
+        self.parentWidget().last_color = color
+
+        self.parentWidget().mark_as_unsaved()
+        self.parentWidget().update()
+        
+    def delete(self):
         node_data = app.nodes[self.node_id]
         reply = QMessageBox.question(self,
             'Confirmation',
@@ -307,6 +360,10 @@ class MainWindow(QMainWindow):
     browse_dir = os.getenv('HOME')
 
     unsaved_changes = False
+
+    # This color will be updated on node color change
+    # and used for new nodes by default.
+    last_color = QColor(127, 127, 127)
 
     actions = {}
     selected_nodes = set()
@@ -485,6 +542,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self.actions['open'])
         menu.addAction(self.actions['save'])
         menu.addAction(self.actions['save_as'])
+        menu.addSeparator()
         menu.addAction(self.actions['exit'])
         menu = menubar.addMenu('&Edit')
         menu.addAction(self.actions['connect_nodes'])
@@ -656,6 +714,7 @@ class MainWindow(QMainWindow):
             'text': 'Node %s' % node_id,
             'x': point.x(),
             'y': point.y(),
+            'color': list(self.last_color.getRgb()[0:3])
         }
         app.edges[node_id] = set()
         widget = NodeWidget(self, node_id=node_id, node_data=app.nodes[node_id]) 
@@ -720,7 +779,17 @@ class MainWindow(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
 
-            app.nodes = {int(k): v for k, v in data['nodes'].items()}
+            def _get_node_data(value):
+                return {
+                    'x': value['x'],
+                    'y': value['y'],
+                    'text': value.get('text', ''),
+                    'color': value.get('color', [127, 127, 127]),
+                }
+            app.nodes = {
+                int(k): _get_node_data(v)
+                for k, v in data['nodes'].items()
+            }
             app.edges = defaultdict(
                 set, {int(k): set(v) for k, v in data['edges'].items()}
             )
