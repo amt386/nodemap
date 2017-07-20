@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         """ Show 'About' dialog. """
         dialog = AboutWindow(self).exec()
 
-    def confirm_exit(self):
+    def confirm_unsaved_changes(self):
         if not self.unsaved_changes:
             return True
 
@@ -442,7 +442,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """ Exit (with confirmation dialog). """
-        if self.confirm_exit():
+        if self.confirm_unsaved_changes():
             event.accept()
         else:
             event.ignore()
@@ -740,9 +740,10 @@ class MainWindow(QMainWindow):
         self.mark_as_unsaved()
         self.update()
 
-
-
     def new(self):
+        if not self.confirm_unsaved_changes():
+            return
+
         for node_widget in self.nodes.values():
             node_widget.close()
             node_widget.destroy()
@@ -758,8 +759,10 @@ class MainWindow(QMainWindow):
 
         self.update()
 
-        
     def open(self, filename):
+        if not self.confirm_unsaved_changes():
+            return
+
         if not filename:
             filename = QFileDialog.getOpenFileName(
                 self, 'Open file', self.browse_dir,
