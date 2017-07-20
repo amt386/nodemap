@@ -3,7 +3,9 @@
 NodeMap application.
 
 """
+import argparse
 import itertools
+import json
 import random
 import os
 import sys
@@ -18,7 +20,8 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QDesktopWidget, QMainWindow, QAction, qApp,
     QDialog, QToolTip, QPushButton, QMessageBox, QLabel,
     QHBoxLayout, QVBoxLayout, QGridLayout,
-    QLineEdit, QTextEdit, QInputDialog
+    QLineEdit, QTextEdit, QInputDialog, QFileDialog
+ 
 )
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -41,27 +44,19 @@ app = None
 class MainApp(QApplication):
 
     icon_logo = None
-    confirm_exit = False    # may set to `True` or make it a property
     
     # For drag'n'drop operations.
     NODE_MIMETYPE = 'application/x-qt-windows-mime;value="NodeWidget"'
 
+    # Document file extension.
+    FILENAME_EXT = 'json'
+
     # Maps node IDs to node data dictionary.
-    nodes = {
-        1: {'x': 100, 'y': 100, 'text': 'Node 1'},
-        2: {'x': 200, 'y': 200, 'text': 'Node 2'},
-        3: {'x': 300, 'y': 300, 'text': 'Node 3'},
-        4: {'x': 400, 'y': 200, 'text': 'Node 4'},
-    }
+    nodes = {}
 
     # Using `collections.defaultdict` for edges to avoid checks.
     # Default value will be empty set (no edges for this node).
-    edges = defaultdict(set, {
-        1: set([4]),
-        2: set([1, 3]),
-        3: set([2]),
-        4: set([1]),
-    })
+    edges = defaultdict(set, {})
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -154,8 +149,18 @@ class NodeWidget(QtWidgets.QWidget):
 
         # Context menu
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu);
-        self.customContextMenuRequested[QtCore.QPoint].connect(self.contextMenuRequested)
+        self.customContextMenuRequested[QtCore.QPoint].connect(
+            self.contextMenuRequested
+        )
         self.show()
+
+    def move(self, *args, **kwargs):
+        ret = super().move(*args, **kwargs)
+        # Update node data with new position
+        app.nodes[self.node_id]['x'] = self.pos().x()
+        app.nodes[self.node_id]['y'] = self.pos().y()
+        self.parentWidget().mark_as_unsaved()
+        return ret
 
     def paintEvent(self, e):
         qp = QPainter()
@@ -258,6 +263,7 @@ class NodeWidget(QtWidgets.QWidget):
         )
         if ok:
             app.nodes[self.node_id]['text'] = text
+        self.parentWidget().mark_as_unsaved()
         self.parentWidget().update()
         
     def delete(self, event):
@@ -270,13 +276,15 @@ class NodeWidget(QtWidgets.QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            # TODO: find more safe and clean way to delete
             del app.nodes[self.node_id]
             del app.edges[self.node_id]
+            for v in app.edges.values():
+                v.discard(self.node_id)
             del self.parentWidget().nodes[self.node_id]
             self.close()
             self.destroy()
 
+        self.parentWidget().mark_as_unsaved()
         self.parentWidget().update()
 
 
@@ -293,11 +301,18 @@ class MainWindow(QMainWindow):
     NODE_LABEL_MAX_LENGTH = 32      # max characters (otherwise truncated)
     BACKGROUND_COLOR = QColor(8, 8, 8)
 
+    # Opened file name (or None)
+    filename = None
+    # Default directory for open/save dialogs
+    browse_dir = os.getenv('HOME')
+
+    unsaved_changes = False
+
     actions = {}
     selected_nodes = set()
 
     nodes = {}      # maps node IDs to actual widget instances
-    
+
     def __init__(self):
         super().__init__()
         self.initUI()
@@ -352,13 +367,21 @@ class MainWindow(QMainWindow):
         dialog = AboutWindow(self).exec()
 
     def confirm_exit(self):
-        if not app.confirm_exit:
+        if not self.unsaved_changes:
             return True
+
+        filename = self.filename or '[No Name]'
         reply = QMessageBox.question(self,
-            'Confirm application close', 'Are you sure you want to quit?',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            'Question', 'Save changes to "%s"?' % filename,
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No
         )
-        return reply == QMessageBox.Yes
+
+        if reply == QMessageBox.Yes:
+            return self.save()
+        elif reply == QMessageBox.No:
+            return True
+        return False
 
     def closeEvent(self, event):
         """ Exit (with confirmation dialog). """
@@ -366,11 +389,28 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
-        
+
+    def update_window_title(self):
+        if self.filename:
+            file_info = '{} ({})'.format(
+                os.path.basename(self.filename),
+                self.filename
+            )
+        else:
+            file_info = '[No Name]'
+        self.setWindowTitle('{}{} - {}'.format(
+           '* ' if self.unsaved_changes else '', file_info,
+            APPLICATION_NAME))
+
+    def mark_as_unsaved(self):
+        self.unsaved_changes = True
+        self.update_window_title()
+
     def initUI(self):
 
         # Window title
-        self.setWindowTitle('{} {}'.format(APPLICATION_NAME, VERSION))
+        self.update_window_title()
+
         self.setWindowIcon(app.icon_logo)
         
         # Set a font used to render all tooltips.
@@ -410,10 +450,41 @@ class MainWindow(QMainWindow):
         action = QAction(app.icon_logo, '&About %s...' % APPLICATION_NAME, self)
         action.triggered.connect(self.about)
         self.actions['about'] = action
+        
+        action_icon = QIcon.fromTheme('document-open')
+        action = QAction(action_icon, '&Open...', self)
+        action.triggered.connect(self.open)
+        self.actions['open'] = action
 
+        action = QAction(
+            QIcon.fromTheme('document-new'),
+            'New', self
+        )
+        action.triggered.connect(self.new)
+        self.actions['new'] = action
+
+        action = QAction(
+            QIcon.fromTheme('document-save'),
+            '&Save', self
+        )
+        action.triggered.connect(self.save)
+        action.setShortcut('F2')
+        self.actions['save'] = action
+
+        action = QAction(
+            QIcon.fromTheme('document-save-as'),
+            'Save as...', self
+        )
+        action.triggered.connect(self.save_as)
+        self.actions['save_as'] = action
+        
         # Menu
         menubar = self.menuBar()
         menu = menubar.addMenu('&File')
+        menu.addAction(self.actions['new'])
+        menu.addAction(self.actions['open'])
+        menu.addAction(self.actions['save'])
+        menu.addAction(self.actions['save_as'])
         menu.addAction(self.actions['exit'])
         menu = menubar.addMenu('&Edit')
         menu.addAction(self.actions['connect_nodes'])
@@ -423,6 +494,10 @@ class MainWindow(QMainWindow):
 
         # Toolbar
         self.toolbar = self.addToolBar('Toolbar')
+        self.toolbar.addAction(self.actions['new'])
+        self.toolbar.addAction(self.actions['open'])
+        self.toolbar.addAction(self.actions['save'])
+        self.toolbar.addAction(self.actions['save_as'])
         self.toolbar.addAction(self.actions['connect_nodes'])
         self.toolbar.addAction(self.actions['disconnect_nodes'])
         
@@ -443,10 +518,14 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # Initialize nodes
+        self.initialize_nodes()
+
+        self.show()
+
+    def initialize_nodes(self):
         for node_id, node_data in app.nodes.items():
             widget = NodeWidget(self, node_id=node_id, node_data=node_data) 
             self.nodes[node_id] = widget
-        self.show()
 
     def dragEnterEvent(self, e):
         """
@@ -581,7 +660,8 @@ class MainWindow(QMainWindow):
         app.edges[node_id] = set()
         widget = NodeWidget(self, node_id=node_id, node_data=app.nodes[node_id]) 
         self.nodes[node_id] = widget
-
+        
+        self.mark_as_unsaved()
         self.update()
 
     def connect_nodes(self):
@@ -589,6 +669,7 @@ class MainWindow(QMainWindow):
         for src_id, trg_id in itertools.product(self.selected_nodes, repeat=2):
             if src_id != trg_id:
                 app.edges[src_id].add(trg_id)
+        self.mark_as_unsaved()
         self.update()
 
     def disconnect_nodes(self):
@@ -597,10 +678,122 @@ class MainWindow(QMainWindow):
             if src_id != trg_id:
                 # `discard` ignores non-existing elements (unlike `remove`)
                 app.edges[src_id].discard(trg_id)
+        self.mark_as_unsaved()
         self.update()
 
 
+
+    def new(self):
+        for node_widget in self.nodes.values():
+            node_widget.close()
+            node_widget.destroy()
+        
+        self.nodes = {}
+
+        app.nodes = {}
+        app.edges = defaultdict(set, {})
+       
+        self.filename = None
+        self.unsaved_changes = False
+        self.update_window_title()
+
+        self.update()
+
+        
+    def open(self, filename):
+        if not filename:
+            filename = QFileDialog.getOpenFileName(
+                self, 'Open file', self.browse_dir,
+                "*.%s" % app.FILENAME_EXT)[0]
+        if not filename:
+            return
+
+        with open(filename, 'r') as f:
+            data = json.load(f)
+
+            if data['version'] != VERSION:
+                reply = QMessageBox.question(self, 'Question',
+                    '"%s" is created with another application version. '
+                    'Attempt to open it anyway?' % filename,
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+            app.nodes = {int(k): v for k, v in data['nodes'].items()}
+            app.edges = defaultdict(
+                set, {int(k): set(v) for k, v in data['edges'].items()}
+            )
+
+            for node_widget in self.nodes.values():
+                node_widget.close()
+                node_widget.destroy()
+
+            self.nodes = {}
+            self.initialize_nodes()
+
+            self.filename = filename
+            self.browse_dir = os.path.dirname(filename)
+            self.unsaved_changes = False
+
+            self.update_window_title()
+
+            self.update()
+        print('Opened file: %s' % filename)
+
+    def save(self):
+
+        if not self.filename:
+            return self.save_as()
+
+        data = {
+            'nodes': app.nodes,
+            'edges': {k: list(v) for k,v in app.edges.items()},
+            'version': VERSION,
+        }
+        with open(self.filename, 'w') as f:
+            json.dump(data, f)
+
+        self.unsaved_changes = False
+        
+        self.update_window_title()
+
+        print('Saved file: %s' % self.filename)
+        return True
+
+    def save_as(self):
+        filename = QFileDialog.getSaveFileName(
+            self, 'Save as', self.browse_dir, "*.%s" % app.FILENAME_EXT)[0]
+        if not filename:
+            return False
+
+        if not filename.lower().endswith('.%s' % app.FILENAME_EXT):
+            if not filename.endswith('.'):
+                filename += '.'
+            filename += app.FILENAME_EXT
+
+        self.filename = filename
+        self.browse_dir = os.path.dirname(filename)
+
+        return self.save()
+
+
 if __name__ == '__main__':
+
+    def _file_path(value):
+        if not os.path.isfile(value):
+            msg = "Could not open %s" % value
+            raise argparse.ArgumentTypeError(msg)
+        return value
+    parser = argparse.ArgumentParser(
+        description='NodeMap application.'
+    )
+    parser.add_argument('file', type=_file_path, nargs='?',
+                    help='Open document.')
+    args = parser.parse_args()
+
     app = MainApp(sys.argv)
     w = MainWindow()
+    if args.file:
+        w.open(args.file)
     sys.exit(app.exec_())
